@@ -16,7 +16,7 @@ import pandas as pd
 from statsbombpy import sb  # type: ignore[import-untyped]
 
 from tactical.adapters.cache import MatchCache
-from tactical.adapters.schemas import MatchInfo, NormalizedEvent
+from tactical.adapters.schemas import FreezeFramePlayer, MatchInfo, NormalizedEvent
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -289,6 +289,69 @@ class StatsBombAdapter:
         return None
 
     @staticmethod
+    def _extract_freeze_frame(
+        row: pd.Series[Any],
+    ) -> tuple[FreezeFramePlayer, ...] | None:
+        """Extract freeze frame data from a raw event row.
+
+        Checks the ``shot_freeze_frame`` column (available on shot
+        events) and a generic ``freeze_frame`` column (present when
+        360 data has been merged into the DataFrame).
+
+        Args:
+            row: A single row from the flattened events DataFrame.
+
+        Returns:
+            Tuple of :class:`FreezeFramePlayer` instances, or ``None``
+            when no freeze frame data is available.
+        """
+        raw_ff: list[dict[str, Any]] | None = None
+
+        shot_ff = row.get("shot_freeze_frame")
+        if shot_ff is not None and not _is_nan(shot_ff):
+            raw_ff = shot_ff
+
+        if raw_ff is None:
+            generic_ff = row.get("freeze_frame")
+            if generic_ff is not None and not _is_nan(generic_ff):
+                raw_ff = generic_ff
+
+        if not raw_ff:
+            return None
+
+        players: list[FreezeFramePlayer] = []
+        for entry in raw_ff:
+            loc = entry.get("location")
+            if loc is None:
+                continue
+            norm_loc = StatsBombAdapter._normalize_coordinates(
+                float(loc[0]), float(loc[1])
+            )
+
+            player_info = entry.get("player")
+            if isinstance(player_info, dict):
+                player_id = str(player_info.get("id", "unknown"))
+            else:
+                player_id = "unknown"
+
+            pos_info = entry.get("position")
+            if isinstance(pos_info, dict):
+                position = str(pos_info.get("name", "unknown"))
+            else:
+                position = "unknown"
+
+            players.append(
+                FreezeFramePlayer(
+                    player_id=player_id,
+                    teammate=bool(entry.get("teammate", False)),
+                    location=norm_loc,
+                    position=position,
+                )
+            )
+
+        return tuple(players) if players else None
+
+    @staticmethod
     def _extract_outcome(row: pd.Series[Any]) -> str:
         """Extract the event outcome from the appropriate column.
 
@@ -412,6 +475,8 @@ class StatsBombAdapter:
             team_id_int = int(row["team_id"])
             team_is_home = team_id_int == home_team_id
 
+            freeze_frame = self._extract_freeze_frame(row)
+
             events.append(
                 NormalizedEvent(
                     event_id=row["id"],
@@ -427,7 +492,7 @@ class StatsBombAdapter:
                     event_outcome=self._extract_outcome(row),
                     under_pressure=under_pressure,
                     body_part=self._extract_body_part(row),
-                    freeze_frame=None,
+                    freeze_frame=freeze_frame,
                     score_home=score_home,
                     score_away=score_away,
                     team_is_home=team_is_home,

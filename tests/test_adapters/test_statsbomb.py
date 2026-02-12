@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 import pytest
 
-from tactical.adapters.schemas import MatchInfo, NormalizedEvent
+from tactical.adapters.schemas import FreezeFramePlayer, MatchInfo, NormalizedEvent
 from tactical.adapters.statsbomb import (
     STATSBOMB_EVENT_TYPE_MAP,
     StatsBombAdapter,
@@ -212,6 +212,30 @@ _FAKE_EVENTS_DATA: dict[str, list[Any]] = {
         float("nan"),
         float("nan"),
         [35.0, 55.0],
+        float("nan"),
+        float("nan"),
+    ],
+    "shot_freeze_frame": [
+        float("nan"),
+        float("nan"),
+        float("nan"),
+        float("nan"),
+        float("nan"),
+        [
+            {
+                "location": [96.0, 40.0],
+                "player": {"id": 101, "name": "Keeper"},
+                "position": {"id": 1, "name": "Goalkeeper"},
+                "teammate": False,
+            },
+            {
+                "location": [60.0, 20.0],
+                "player": {"id": 102, "name": "Defender"},
+                "position": {"id": 3, "name": "Center Back"},
+                "teammate": False,
+            },
+        ],
+        float("nan"),
         float("nan"),
         float("nan"),
     ],
@@ -626,3 +650,124 @@ class TestParseTimestamp:
         """Fractional seconds are preserved."""
         result = _parse_timestamp("00:00:05.500")
         assert abs(result - 5.5) < 1e-9
+
+
+# ------------------------------------------------------------------
+# Freeze frame extraction
+# ------------------------------------------------------------------
+
+
+class TestFreezeFrameExtraction:
+    """Verify freeze frame data is extracted into FreezeFramePlayer tuples."""
+
+    def test_freeze_frame_extraction(
+        self,
+        adapter: StatsBombAdapter,
+        fake_events_df: pd.DataFrame,
+    ) -> None:
+        """Shot event with freeze frame produces FreezeFramePlayer objects."""
+        events = adapter._normalize_events(fake_events_df, "100")
+        shot_evt = next(e for e in events if e.event_type == "shot")
+
+        assert shot_evt.freeze_frame is not None
+        assert len(shot_evt.freeze_frame) == 2
+        assert all(isinstance(p, FreezeFramePlayer) for p in shot_evt.freeze_frame)
+
+        keeper = shot_evt.freeze_frame[0]
+        assert keeper.player_id == "101"
+        assert keeper.teammate is False
+        assert keeper.position == "Goalkeeper"
+
+        defender = shot_evt.freeze_frame[1]
+        assert defender.player_id == "102"
+        assert defender.teammate is False
+        assert defender.position == "Center Back"
+
+    def test_freeze_frame_none_when_missing(
+        self,
+        adapter: StatsBombAdapter,
+        fake_events_df: pd.DataFrame,
+    ) -> None:
+        """Events without freeze frame data get freeze_frame=None."""
+        events = adapter._normalize_events(fake_events_df, "100")
+
+        for evt in events:
+            if evt.event_type != "shot":
+                assert evt.freeze_frame is None, (
+                    f"{evt.event_type} event should have no freeze frame"
+                )
+
+    def test_freeze_frame_coordinate_normalization(
+        self,
+        adapter: StatsBombAdapter,
+        fake_events_df: pd.DataFrame,
+    ) -> None:
+        """Freeze frame player locations are converted from 120x80 to 0-100."""
+        events = adapter._normalize_events(fake_events_df, "100")
+        shot_evt = next(e for e in events if e.event_type == "shot")
+
+        assert shot_evt.freeze_frame is not None
+        keeper = shot_evt.freeze_frame[0]
+        # Raw [96.0, 40.0] -> (96/120*100, (80-40)/80*100) = (80.0, 50.0)
+        assert abs(keeper.location[0] - 80.0) < 0.01
+        assert abs(keeper.location[1] - 50.0) < 0.01
+
+        defender = shot_evt.freeze_frame[1]
+        # Raw [60.0, 20.0] -> (60/120*100, (80-20)/80*100) = (50.0, 75.0)
+        assert abs(defender.location[0] - 50.0) < 0.01
+        assert abs(defender.location[1] - 75.0) < 0.01
+
+    def test_360_freeze_frame_extraction(self, adapter: StatsBombAdapter) -> None:
+        """Generic freeze_frame column (360 data) is extracted correctly."""
+        data: dict[str, list[Any]] = {
+            "id": ["s1", "s2", "evt-1"],
+            "index": [1, 2, 3],
+            "match_id": [100] * 3,
+            "type": ["Starting XI", "Starting XI", "Pass"],
+            "period": [1] * 3,
+            "timestamp": ["00:00:00.000"] * 3,
+            "minute": [0] * 3,
+            "second": [0] * 3,
+            "team": ["HomeFC", "AwayFC", "HomeFC"],
+            "team_id": [1, 2, 1],
+            "player": [float("nan"), float("nan"), "Alice"],
+            "player_id": [float("nan"), float("nan"), 10.0],
+            "location": [float("nan"), float("nan"), [60.0, 40.0]],
+            "under_pressure": [float("nan")] * 3,
+            "pass_outcome": [float("nan")] * 3,
+            "pass_body_part": [float("nan"), float("nan"), "Right Foot"],
+            "pass_end_location": [float("nan"), float("nan"), [80.0, 50.0]],
+            "pass_type": [float("nan")] * 3,
+            "freeze_frame": [
+                float("nan"),
+                float("nan"),
+                [
+                    {
+                        "teammate": True,
+                        "actor": True,
+                        "keeper": False,
+                        "location": [60.0, 40.0],
+                    },
+                    {
+                        "teammate": False,
+                        "actor": False,
+                        "keeper": True,
+                        "location": [120.0, 40.0],
+                    },
+                ],
+            ],
+        }
+        df = pd.DataFrame(data)
+        events = adapter._normalize_events(df, "100")
+
+        assert len(events) == 1
+        evt = events[0]
+        assert evt.freeze_frame is not None
+        assert len(evt.freeze_frame) == 2
+
+        actor = evt.freeze_frame[0]
+        assert actor.teammate is True
+        assert actor.player_id == "unknown"
+        assert actor.position == "unknown"
+        assert abs(actor.location[0] - 50.0) < 0.01
+        assert abs(actor.location[1] - 50.0) < 0.01
