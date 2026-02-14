@@ -13,6 +13,7 @@ import math
 from typing import TYPE_CHECKING, Any
 
 import pandas as pd
+import requests
 from statsbombpy import sb  # type: ignore[import-untyped]
 
 from tactical.adapters.cache import MatchCache
@@ -177,7 +178,8 @@ class StatsBombAdapter:
 
         Checks the disk cache first. On a cache miss the raw event
         data is fetched from the StatsBomb API and cached for future
-        calls.
+        calls.  360 freeze-frame data is fetched separately via
+        :pymethod:`_load_360_frames` and merged by ``event_uuid``.
 
         Args:
             match_id: StatsBomb match identifier (as string).
@@ -192,7 +194,45 @@ class StatsBombAdapter:
         else:
             raw_df = sb.events(match_id=int(match_id), flatten_attrs=True)
             self._cache.put(match_id, raw_df.to_dict(orient="list"))
-        return self._normalize_events(raw_df, match_id)
+
+        frames_lookup = self._load_360_frames(match_id)
+        return self._normalize_events(raw_df, match_id, frames_lookup)
+
+    def _load_360_frames(self, match_id: str) -> dict[str, list[dict[str, Any]]]:
+        """Fetch 360 freeze-frame data and return a per-event lookup.
+
+        Results are cached under the key ``"{match_id}_360"``.  If the
+        match has no 360 data the API returns a 404; this is caught
+        and an empty list is cached so subsequent calls never re-hit
+        the network.
+
+        Args:
+            match_id: StatsBomb match identifier (as string).
+
+        Returns:
+            Dictionary mapping ``event_uuid`` to its list of
+            freeze-frame player entries.  Empty when no 360 data
+            exists for the match.
+        """
+        cache_key = f"{match_id}_360"
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            raw_frames: list[dict[str, Any]] = cached["frames"]
+        else:
+            try:
+                raw_frames = sb.frames(match_id=int(match_id), fmt="dict")
+            except requests.exceptions.HTTPError:
+                logger.debug("No 360 data available for match %s", match_id)
+                raw_frames = []
+            self._cache.put(cache_key, {"frames": raw_frames})
+
+        lookup: dict[str, list[dict[str, Any]]] = {}
+        for entry in raw_frames:
+            event_uuid = entry.get("event_uuid")
+            ff = entry.get("freeze_frame")
+            if event_uuid is not None and ff is not None:
+                lookup[str(event_uuid)] = ff
+        return lookup
 
     def load_match_lineups(self, match_id: str) -> dict[str, TeamLineup]:
         """Load and normalize lineup data for both teams in a match.
@@ -218,13 +258,20 @@ class StatsBombAdapter:
             self._cache.put(cache_key, raw_lineups)
         return self._normalize_lineups(raw_lineups)
 
-    def supports_360(self) -> bool:
-        """Indicate that StatsBomb supports 360 freeze-frame data.
+    def supports_360(self, match_id: str) -> bool:
+        """Check whether 360 freeze-frame data exists for a match.
+
+        Delegates to :meth:`_load_360_frames`, which caches both
+        positive and negative results so repeated calls are free.
+
+        Args:
+            match_id: StatsBomb match identifier (as string).
 
         Returns:
-            Always ``True``.
+            ``True`` if the match has at least one 360 freeze frame,
+            ``False`` otherwise.
         """
-        return True
+        return bool(self._load_360_frames(match_id))
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -362,15 +409,19 @@ class StatsBombAdapter:
     @staticmethod
     def _extract_freeze_frame(
         row: pd.Series[Any],
+        frames_entry: list[dict[str, Any]] | None = None,
     ) -> tuple[FreezeFramePlayer, ...] | None:
-        """Extract freeze frame data from a raw event row.
+        """Extract freeze frame data from 360 data or the event row.
 
-        Checks the ``shot_freeze_frame`` column (available on shot
-        events) and a generic ``freeze_frame`` column (present when
-        360 data has been merged into the DataFrame).
+        Priority order:
+
+        1. ``frames_entry`` -- 360 data fetched via ``sb.frames()``.
+        2. ``shot_freeze_frame`` column embedded in shot events.
 
         Args:
             row: A single row from the flattened events DataFrame.
+            frames_entry: Per-event freeze-frame list from the 360
+                endpoint, or ``None`` when 360 data is unavailable.
 
         Returns:
             Tuple of :class:`FreezeFramePlayer` instances, or ``None``
@@ -378,14 +429,13 @@ class StatsBombAdapter:
         """
         raw_ff: list[dict[str, Any]] | None = None
 
-        shot_ff = row.get("shot_freeze_frame")
-        if shot_ff is not None and not _is_nan(shot_ff):
-            raw_ff = shot_ff
+        if frames_entry is not None:
+            raw_ff = frames_entry
 
         if raw_ff is None:
-            generic_ff = row.get("freeze_frame")
-            if generic_ff is not None and not _is_nan(generic_ff):
-                raw_ff = generic_ff
+            shot_ff = row.get("shot_freeze_frame")
+            if shot_ff is not None and not _is_nan(shot_ff):
+                raw_ff = shot_ff
 
         if not raw_ff:
             return None
@@ -460,12 +510,16 @@ class StatsBombAdapter:
         self,
         raw_df: pd.DataFrame,
         match_id: str,
+        frames_lookup: dict[str, list[dict[str, Any]]] | None = None,
     ) -> list[NormalizedEvent]:
         """Convert a raw StatsBomb events DataFrame to normalized events.
 
         Args:
             raw_df: Flattened events DataFrame from ``statsbombpy``.
             match_id: Match identifier string.
+            frames_lookup: Optional mapping of ``event_uuid`` to 360
+                freeze-frame player entries, as returned by
+                :pymethod:`_load_360_frames`.
 
         Returns:
             List of :class:`NormalizedEvent` sorted by
@@ -552,7 +606,10 @@ class StatsBombAdapter:
             team_id_int = int(row["team_id"])
             team_is_home = team_id_int == home_team_id
 
-            freeze_frame = self._extract_freeze_frame(row)
+            ff_entry = (
+                frames_lookup.get(row["id"]) if frames_lookup is not None else None
+            )
+            freeze_frame = self._extract_freeze_frame(row, ff_entry)
 
             events.append(
                 NormalizedEvent(

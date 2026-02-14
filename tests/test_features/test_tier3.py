@@ -581,11 +581,11 @@ class TestRelationalOpponentMetrics:
         relational_ext: RelationalFeatureExtractor,
         events_with_ff: tuple[NormalizedEvent, ...],
     ) -> None:
-        """Opp defensive line = mean x of 4 deepest (highest x) opponents."""
+        """Opp defensive line = mean x of 3 deepest (highest x) opponents."""
         result = relational_ext.extract(events_with_ff, _CONTEXT)
 
-        # Sorted opp x: 30, 40, 55, 65, 75 -> 4 highest: 40, 55, 65, 75
-        expected = (40.0 + 55.0 + 65.0 + 75.0) / 4.0
+        # Sorted opp x: 30, 40, 55, 65, 75 -> 4 highest: 55, 65, 75
+        expected = (55.0 + 65.0 + 75.0) / 3.0
         assert result["t3_relational_opp_defensive_line"] == pytest.approx(
             expected,
             abs=1e-6,

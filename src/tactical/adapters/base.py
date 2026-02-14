@@ -74,11 +74,14 @@ class DataAdapter(Protocol):
         """
         ...
 
-    def supports_360(self) -> bool:
-        """Indicate whether this adapter can supply 360 freeze frames.
+    def supports_360(self, match_id: str) -> bool:
+        """Check whether 360 freeze-frame data exists for a match.
+
+        Args:
+            match_id: Unique match identifier as used by the provider.
 
         Returns:
-            ``True`` if the provider offers 360 data, ``False``
-            otherwise.
+            ``True`` if 360 data is available for the given match,
+            ``False`` otherwise.
         """
         ...

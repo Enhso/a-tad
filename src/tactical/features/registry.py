@@ -4,11 +4,34 @@ Provides :class:`FeatureRegistry`, the central coordinator that stores
 :class:`~tactical.features.base.FeatureExtractor` instances, filters
 them by tier, and orchestrates batch extraction with duplicate-name
 detection.
+
+Also provides :func:`create_default_registry`, a factory that returns a
+registry pre-loaded with every standard Tier 1 / 2 / 3 extractor.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+
+from tactical.features.tier1 import (
+    CarryingFeatureExtractor,
+    ContextFeatureExtractor,
+    DefendingFeatureExtractor,
+    PassingFeatureExtractor,
+    ShootingFeatureExtractor,
+    SpatialFeatureExtractor,
+    TemporalFeatureExtractor,
+)
+from tactical.features.tier2 import (
+    PressingFeatureExtractor,
+    TeamShapeFeatureExtractor,
+    TransitionFeatureExtractor,
+    ZonalFeatureExtractor,
+)
+from tactical.features.tier3 import (
+    FormationFeatureExtractor,
+    RelationalFeatureExtractor,
+)
 
 if TYPE_CHECKING:
     from tactical.adapters.schemas import MatchContext, NormalizedEvent
@@ -121,3 +144,36 @@ class FeatureRegistry:
                     raise ValueError(msg)
             merged.update(result)
         return merged
+
+
+def create_default_registry() -> FeatureRegistry:
+    """Create a :class:`FeatureRegistry` with all standard extractors.
+
+    Registers every Tier 1, Tier 2, and Tier 3 extractor shipped with
+    the engine.
+
+    Returns:
+        A fully populated :class:`FeatureRegistry`.
+    """
+    registry = FeatureRegistry()
+
+    # Tier 1
+    registry.register(SpatialFeatureExtractor())
+    registry.register(TemporalFeatureExtractor())
+    registry.register(PassingFeatureExtractor())
+    registry.register(CarryingFeatureExtractor())
+    registry.register(DefendingFeatureExtractor())
+    registry.register(ShootingFeatureExtractor())
+    registry.register(ContextFeatureExtractor())
+
+    # Tier 2
+    registry.register(ZonalFeatureExtractor())
+    registry.register(TeamShapeFeatureExtractor())
+    registry.register(PressingFeatureExtractor())
+    registry.register(TransitionFeatureExtractor())
+
+    # Tier 3
+    registry.register(FormationFeatureExtractor())
+    registry.register(RelationalFeatureExtractor())
+
+    return registry

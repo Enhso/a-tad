@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
+import requests
 
 from tactical.adapters.schemas import FreezeFramePlayer, MatchInfo, NormalizedEvent
 from tactical.adapters.statsbomb import (
@@ -451,6 +452,7 @@ class TestCacheUsage:
     ) -> None:
         """On cache miss the API is called; on cache hit it is not."""
         mock_sb.events.return_value = fake_events_df
+        mock_sb.frames.side_effect = requests.exceptions.HTTPError("404")
 
         # First call: cache miss -> API called
         result_1 = adapter.load_match_events("100")
@@ -459,6 +461,7 @@ class TestCacheUsage:
 
         # Second call: cache hit -> API NOT called again
         mock_sb.events.reset_mock()
+        mock_sb.frames.reset_mock()
         result_2 = adapter.load_match_events("100")
         mock_sb.events.assert_not_called()
         assert len(result_2) == len(result_1)
@@ -660,12 +663,12 @@ class TestParseTimestamp:
 class TestFreezeFrameExtraction:
     """Verify freeze frame data is extracted into FreezeFramePlayer tuples."""
 
-    def test_freeze_frame_extraction(
+    def test_shot_freeze_frame_fallback(
         self,
         adapter: StatsBombAdapter,
         fake_events_df: pd.DataFrame,
     ) -> None:
-        """Shot event with freeze frame produces FreezeFramePlayer objects."""
+        """Shot event uses shot_freeze_frame when no 360 data is present."""
         events = adapter._normalize_events(fake_events_df, "100")
         shot_evt = next(e for e in events if e.event_type == "shot")
 
@@ -688,7 +691,7 @@ class TestFreezeFrameExtraction:
         adapter: StatsBombAdapter,
         fake_events_df: pd.DataFrame,
     ) -> None:
-        """Events without freeze frame data get freeze_frame=None."""
+        """Events without 360 or shot freeze frame data get freeze_frame=None."""
         events = adapter._normalize_events(fake_events_df, "100")
 
         for evt in events:
@@ -717,8 +720,8 @@ class TestFreezeFrameExtraction:
         assert abs(defender.location[0] - 50.0) < 0.01
         assert abs(defender.location[1] - 75.0) < 0.01
 
-    def test_360_freeze_frame_extraction(self, adapter: StatsBombAdapter) -> None:
-        """Generic freeze_frame column (360 data) is extracted correctly."""
+    def test_360_frames_attached_to_events(self, adapter: StatsBombAdapter) -> None:
+        """360 data from sb.frames() is attached to matching events."""
         data: dict[str, list[Any]] = {
             "id": ["s1", "s2", "evt-1"],
             "index": [1, 2, 3],
@@ -738,27 +741,25 @@ class TestFreezeFrameExtraction:
             "pass_body_part": [float("nan"), float("nan"), "Right Foot"],
             "pass_end_location": [float("nan"), float("nan"), [80.0, 50.0]],
             "pass_type": [float("nan")] * 3,
-            "freeze_frame": [
-                float("nan"),
-                float("nan"),
-                [
-                    {
-                        "teammate": True,
-                        "actor": True,
-                        "keeper": False,
-                        "location": [60.0, 40.0],
-                    },
-                    {
-                        "teammate": False,
-                        "actor": False,
-                        "keeper": True,
-                        "location": [120.0, 40.0],
-                    },
-                ],
+        }
+        frames_lookup: dict[str, list[dict[str, Any]]] = {
+            "evt-1": [
+                {
+                    "teammate": True,
+                    "actor": True,
+                    "keeper": False,
+                    "location": [60.0, 40.0],
+                },
+                {
+                    "teammate": False,
+                    "actor": False,
+                    "keeper": True,
+                    "location": [120.0, 40.0],
+                },
             ],
         }
         df = pd.DataFrame(data)
-        events = adapter._normalize_events(df, "100")
+        events = adapter._normalize_events(df, "100", frames_lookup)
 
         assert len(events) == 1
         evt = events[0]
@@ -771,3 +772,191 @@ class TestFreezeFrameExtraction:
         assert actor.position == "unknown"
         assert abs(actor.location[0] - 50.0) < 0.01
         assert abs(actor.location[1] - 50.0) < 0.01
+
+    def test_360_frames_prioritized_over_shot_freeze_frame(
+        self,
+        adapter: StatsBombAdapter,
+        fake_events_df: pd.DataFrame,
+    ) -> None:
+        """When 360 data exists for a shot, it takes priority over shot_freeze_frame."""
+        frames_360_players: list[dict[str, Any]] = [
+            {
+                "teammate": True,
+                "actor": True,
+                "keeper": False,
+                "location": [108.0, 28.0],
+            },
+        ]
+        frames_lookup: dict[str, list[dict[str, Any]]] = {
+            "evt-shot-1": frames_360_players,
+        }
+        events = adapter._normalize_events(fake_events_df, "100", frames_lookup)
+        shot_evt = next(e for e in events if e.event_type == "shot")
+
+        assert shot_evt.freeze_frame is not None
+        # 360 data has 1 player; shot_freeze_frame has 2
+        assert len(shot_evt.freeze_frame) == 1
+        assert shot_evt.freeze_frame[0].teammate is True
+
+    @patch("tactical.adapters.statsbomb.sb")
+    def test_load_match_events_fetches_360(
+        self,
+        mock_sb: MagicMock,
+        adapter: StatsBombAdapter,
+        fake_events_df: pd.DataFrame,
+    ) -> None:
+        """load_match_events calls sb.frames() for 360 data."""
+        mock_sb.events.return_value = fake_events_df
+        mock_sb.frames.return_value = [
+            {
+                "event_uuid": "evt-pass-1",
+                "match_id": 100,
+                "visible_area": [],
+                "freeze_frame": [
+                    {
+                        "teammate": True,
+                        "actor": True,
+                        "keeper": False,
+                        "location": [60.0, 40.0],
+                    },
+                ],
+            },
+        ]
+
+        events = adapter.load_match_events("100")
+        mock_sb.frames.assert_called_once_with(match_id=100, fmt="dict")
+
+        pass_evt = next(e for e in events if e.event_type == "pass")
+        assert pass_evt.freeze_frame is not None
+        assert len(pass_evt.freeze_frame) == 1
+
+    @patch("tactical.adapters.statsbomb.sb")
+    def test_load_match_events_handles_no_360(
+        self,
+        mock_sb: MagicMock,
+        adapter: StatsBombAdapter,
+        fake_events_df: pd.DataFrame,
+    ) -> None:
+        """load_match_events gracefully handles 404 when no 360 data exists."""
+        mock_sb.events.return_value = fake_events_df
+        mock_sb.frames.side_effect = requests.exceptions.HTTPError("404")
+
+        events = adapter.load_match_events("100")
+        assert len(events) > 0
+
+        # Non-shot events should have no freeze frame
+        for evt in events:
+            if evt.event_type != "shot":
+                assert evt.freeze_frame is None
+
+    @patch("tactical.adapters.statsbomb.sb")
+    def test_360_frames_cached(
+        self,
+        mock_sb: MagicMock,
+        adapter: StatsBombAdapter,
+        fake_events_df: pd.DataFrame,
+    ) -> None:
+        """360 data is cached after the first fetch."""
+        mock_sb.events.return_value = fake_events_df
+        mock_sb.frames.return_value = []
+
+        adapter.load_match_events("100")
+        mock_sb.frames.assert_called_once()
+
+        # Second call should use cache
+        mock_sb.frames.reset_mock()
+        mock_sb.events.reset_mock()
+        adapter.load_match_events("100")
+        mock_sb.frames.assert_not_called()
+
+
+# ------------------------------------------------------------------
+# supports_360
+# ------------------------------------------------------------------
+
+
+class TestSupports360:
+    """Verify per-match 360 availability check."""
+
+    @patch("tactical.adapters.statsbomb.sb")
+    def test_returns_true_when_360_exists(
+        self,
+        mock_sb: MagicMock,
+        adapter: StatsBombAdapter,
+    ) -> None:
+        """supports_360 returns True when sb.frames returns data."""
+        mock_sb.frames.return_value = [
+            {
+                "event_uuid": "evt-1",
+                "match_id": 100,
+                "visible_area": [],
+                "freeze_frame": [
+                    {
+                        "teammate": True,
+                        "actor": True,
+                        "keeper": False,
+                        "location": [60.0, 40.0],
+                    },
+                ],
+            },
+        ]
+
+        assert adapter.supports_360("100") is True
+        mock_sb.frames.assert_called_once_with(match_id=100, fmt="dict")
+
+    @patch("tactical.adapters.statsbomb.sb")
+    def test_returns_false_when_no_360(
+        self,
+        mock_sb: MagicMock,
+        adapter: StatsBombAdapter,
+    ) -> None:
+        """supports_360 returns False when sb.frames raises 404."""
+        mock_sb.frames.side_effect = requests.exceptions.HTTPError("404")
+
+        assert adapter.supports_360("200") is False
+
+    @patch("tactical.adapters.statsbomb.sb")
+    def test_negative_result_cached(
+        self,
+        mock_sb: MagicMock,
+        adapter: StatsBombAdapter,
+    ) -> None:
+        """A 404 result is cached so the API is not hit again."""
+        mock_sb.frames.side_effect = requests.exceptions.HTTPError("404")
+
+        assert adapter.supports_360("300") is False
+        mock_sb.frames.assert_called_once()
+
+        mock_sb.frames.reset_mock()
+        assert adapter.supports_360("300") is False
+        mock_sb.frames.assert_not_called()
+
+    @patch("tactical.adapters.statsbomb.sb")
+    def test_positive_result_cached(
+        self,
+        mock_sb: MagicMock,
+        adapter: StatsBombAdapter,
+    ) -> None:
+        """A successful fetch is cached so the API is not hit again."""
+        mock_sb.frames.return_value = [
+            {
+                "event_uuid": "evt-1",
+                "match_id": 400,
+                "visible_area": [],
+                "freeze_frame": [
+                    {
+                        "teammate": True,
+                        "actor": False,
+                        "keeper": False,
+                        "location": [50.0, 50.0],
+                    },
+                ],
+            },
+        ]
+
+        assert adapter.supports_360("400") is True
+        mock_sb.frames.assert_called_once()
+
+        mock_sb.frames.reset_mock()
+        assert adapter.supports_360("400") is True
+        mock_sb.frames.assert_not_called()

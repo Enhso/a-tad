@@ -64,12 +64,8 @@ class Dataset:
 
 DATASETS: tuple[Dataset, ...] = (
     Dataset("Arsenal 15-16 Premier League", competition_id=2, season_id=27),
-    Dataset("Arsenal 15-16 Champions League", competition_id=16, season_id=27),
     Dataset("Leverkusen 23-24 Bundesliga", competition_id=9, season_id=281),
     Dataset("Arsenal Invincibles 03-04 Premier League", competition_id=2, season_id=44),
-    Dataset(
-        "Arsenal Invincibles 03-04 Champions League", competition_id=16, season_id=44
-    ),
 )
 
 
@@ -111,7 +107,7 @@ def _has_360(events: list[NormalizedEvent]) -> bool:
     Returns:
         Whether 360 data is present in at least one event.
     """
-    return any(e.freeze_frame is not None for e in events)
+    return any(e.freeze_frame != [] for e in events)
 
 
 def _download_dataset(

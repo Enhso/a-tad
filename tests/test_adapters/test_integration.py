@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
+import requests
 
 from tactical.adapters import (
     CONTROLLED_EVENT_TYPES,
@@ -564,6 +565,7 @@ class TestFullAdapterPipeline:
         """
         fake_df = pd.DataFrame(_INTEGRATION_EVENTS)
         mock_sb.events.return_value = fake_df
+        mock_sb.frames.side_effect = requests.exceptions.HTTPError("404")
 
         adapter = StatsBombAdapter(cache_dir=tmp_path / "match_cache")
 
@@ -636,6 +638,7 @@ class TestFullAdapterPipeline:
 
         # -- Second call: cache hit -> API NOT called again -------------
         mock_sb.events.reset_mock()
+        mock_sb.frames.reset_mock()
         events_cached = adapter.load_match_events("999")
 
         mock_sb.events.assert_not_called()
@@ -745,6 +748,7 @@ class TestFullAdapterPipeline:
         """Event and lineup caches use distinct keys and don't interfere."""
         fake_df = pd.DataFrame(_INTEGRATION_EVENTS)
         mock_sb.events.return_value = fake_df
+        mock_sb.frames.side_effect = requests.exceptions.HTTPError("404")
         mock_sb.lineups.return_value = _INTEGRATION_LINEUPS
 
         adapter = StatsBombAdapter(cache_dir=tmp_path / "match_cache")
