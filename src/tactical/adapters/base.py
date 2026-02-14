@@ -20,7 +20,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
-    from tactical.adapters.schemas import MatchInfo, NormalizedEvent
+    from tactical.adapters.schemas import MatchInfo, NormalizedEvent, TeamLineup
 
 
 @runtime_checkable
@@ -56,6 +56,21 @@ class DataAdapter(Protocol):
         Returns:
             List of :class:`NormalizedEvent` instances sorted by
             ``(period, timestamp)``.
+        """
+        ...
+
+    def load_match_lineups(self, match_id: str) -> dict[str, TeamLineup]:
+        """Load lineup data for both teams in a match.
+
+        Returns squad lists including positional histories, cards, and
+        starter/substitute classification for every player.
+
+        Args:
+            match_id: Unique match identifier as used by the provider.
+
+        Returns:
+            Dictionary mapping team ID strings to
+            :class:`TeamLineup` instances.
         """
         ...
 

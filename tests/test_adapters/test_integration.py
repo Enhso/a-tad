@@ -2,7 +2,8 @@
 
 Exercises the end-to-end flow: raw StatsBomb-shaped data is fetched
 (mocked), normalized into :class:`NormalizedEvent` instances, cached to
-disk, and served from the cache on subsequent calls.
+disk, and served from the cache on subsequent calls.  Also validates
+that lineup data is loaded, normalized, and cached independently.
 """
 
 from __future__ import annotations
@@ -14,9 +15,13 @@ import pandas as pd
 
 from tactical.adapters import (
     CONTROLLED_EVENT_TYPES,
+    CardEvent,
     FreezeFramePlayer,
     NormalizedEvent,
+    PlayerLineup,
+    PositionSpell,
     StatsBombAdapter,
+    TeamLineup,
 )
 
 if TYPE_CHECKING:
@@ -25,6 +30,140 @@ if TYPE_CHECKING:
 # ------------------------------------------------------------------
 # Fixture data
 # ------------------------------------------------------------------
+
+_INTEGRATION_LINEUPS: dict[str, dict[str, Any]] = {
+    "1": {
+        "team_id": 1,
+        "team_name": "HomeFC",
+        "lineup": [
+            {
+                "player_id": 10,
+                "player_name": "Alice",
+                "player_nickname": None,
+                "jersey_number": 1,
+                "country": {"id": 1, "name": "Testland"},
+                "cards": [],
+                "positions": [
+                    {
+                        "position_id": 1,
+                        "position": "Goalkeeper",
+                        "from": "00:00",
+                        "to": None,
+                        "from_period": 1,
+                        "to_period": None,
+                        "start_reason": "Starting XI",
+                        "end_reason": "Final Whistle",
+                    },
+                ],
+            },
+            {
+                "player_id": 40,
+                "player_name": "Dave",
+                "player_nickname": None,
+                "jersey_number": 7,
+                "country": {"id": 1, "name": "Testland"},
+                "cards": [
+                    {
+                        "time": "67:40",
+                        "card_type": "Yellow Card",
+                        "reason": "Foul Committed",
+                        "period": 2,
+                    },
+                ],
+                "positions": [
+                    {
+                        "position_id": 17,
+                        "position": "Right Wing",
+                        "from": "00:00",
+                        "to": "60:00",
+                        "from_period": 1,
+                        "to_period": 2,
+                        "start_reason": "Starting XI",
+                        "end_reason": "Tactical Shift",
+                    },
+                    {
+                        "position_id": 23,
+                        "position": "Center Forward",
+                        "from": "60:00",
+                        "to": None,
+                        "from_period": 2,
+                        "to_period": None,
+                        "start_reason": "Tactical Shift",
+                        "end_reason": "Final Whistle",
+                    },
+                ],
+            },
+            {
+                "player_id": 50,
+                "player_name": "Eve",
+                "player_nickname": None,
+                "jersey_number": 14,
+                "country": {"id": 1, "name": "Testland"},
+                "cards": [],
+                "positions": [],
+            },
+        ],
+    },
+    "2": {
+        "team_id": 2,
+        "team_name": "AwayFC",
+        "lineup": [
+            {
+                "player_id": 20,
+                "player_name": "Bob",
+                "player_nickname": None,
+                "jersey_number": 9,
+                "country": {"id": 2, "name": "Otherland"},
+                "cards": [],
+                "positions": [
+                    {
+                        "position_id": 23,
+                        "position": "Center Forward",
+                        "from": "00:00",
+                        "to": None,
+                        "from_period": 1,
+                        "to_period": None,
+                        "start_reason": "Starting XI",
+                        "end_reason": "Final Whistle",
+                    },
+                ],
+            },
+            {
+                "player_id": 30,
+                "player_name": "Carol",
+                "player_nickname": None,
+                "jersey_number": 5,
+                "country": {"id": 2, "name": "Otherland"},
+                "cards": [
+                    {
+                        "time": "35:10",
+                        "card_type": "Yellow Card",
+                        "reason": "Foul Committed",
+                        "period": 1,
+                    },
+                    {
+                        "time": "80:10",
+                        "card_type": "Second Yellow",
+                        "reason": "Foul Committed",
+                        "period": 2,
+                    },
+                ],
+                "positions": [
+                    {
+                        "position_id": 5,
+                        "position": "Left Center Back",
+                        "from": "00:00",
+                        "to": None,
+                        "from_period": 1,
+                        "to_period": None,
+                        "start_reason": "Starting XI",
+                        "end_reason": "Final Whistle",
+                    },
+                ],
+            },
+        ],
+    },
+}
 
 _INTEGRATION_EVENTS: dict[str, list[Any]] = {
     "id": [
@@ -502,3 +641,135 @@ class TestFullAdapterPipeline:
         mock_sb.events.assert_not_called()
         assert len(events_cached) == len(events)
         assert [e.event_id for e in events_cached] == [e.event_id for e in events]
+
+    @patch("tactical.adapters.statsbomb.sb")
+    def test_full_lineup_pipeline(
+        self,
+        mock_sb: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """Exercise lineup fetch -> normalize -> cache -> cache-hit flow.
+
+        The mock lineup data contains two teams:
+          - HomeFC (team 1): 2 starters + 1 unused sub
+          - AwayFC (team 2): 2 starters
+
+        Validates schema types, starter detection, position spells,
+        cards, caching, and cache-key isolation from events.
+        """
+        mock_sb.lineups.return_value = _INTEGRATION_LINEUPS
+
+        adapter = StatsBombAdapter(cache_dir=tmp_path / "match_cache")
+
+        # -- First call: cache miss -> API invoked ----------------------
+        lineups = adapter.load_match_lineups("999")
+
+        mock_sb.lineups.assert_called_once_with(match_id=999, fmt="dict")
+
+        # -- Two teams returned -----------------------------------------
+        assert len(lineups) == 2
+        assert "1" in lineups
+        assert "2" in lineups
+
+        # -- All values are TeamLineup instances ------------------------
+        for team in lineups.values():
+            assert isinstance(team, TeamLineup)
+            for player in team.players:
+                assert isinstance(player, PlayerLineup)
+                for pos in player.positions:
+                    assert isinstance(pos, PositionSpell)
+                for card in player.cards:
+                    assert isinstance(card, CardEvent)
+
+        # -- Team names preserved ---------------------------------------
+        assert lineups["1"].team_name == "HomeFC"
+        assert lineups["2"].team_name == "AwayFC"
+
+        # -- Player counts (starters + subs + unused) -------------------
+        assert len(lineups["1"].players) == 3
+        assert len(lineups["2"].players) == 2
+
+        # -- Starter detection ------------------------------------------
+        home = lineups["1"]
+        alice = home.players[0]
+        dave = home.players[1]
+        eve = home.players[2]
+        assert alice.starter is True
+        assert dave.starter is True
+        assert eve.starter is False
+        assert eve.positions == ()
+
+        # -- Player IDs are strings -------------------------------------
+        assert alice.player_id == "10"
+        assert dave.player_id == "40"
+
+        # -- Position spells: tactical shift ----------------------------
+        assert len(dave.positions) == 2
+        assert dave.positions[0].position == "Right Wing"
+        assert dave.positions[0].end_reason == "Tactical Shift"
+        assert dave.positions[1].position == "Center Forward"
+        assert dave.positions[1].start_reason == "Tactical Shift"
+        assert dave.positions[1].to_time is None
+
+        # -- Cards: single card -----------------------------------------
+        assert len(dave.cards) == 1
+        assert dave.cards[0].card_type == "Yellow Card"
+        assert dave.cards[0].period == 2
+
+        # -- Cards: double yellow ---------------------------------------
+        carol = lineups["2"].players[1]
+        assert len(carol.cards) == 2
+        assert carol.cards[0].card_type == "Yellow Card"
+        assert carol.cards[1].card_type == "Second Yellow"
+
+        # -- Lineup cache file created ----------------------------------
+        cache_dir = tmp_path / "match_cache"
+        lineup_cache = list(cache_dir.glob("match_999_lineups.pkl"))
+        assert len(lineup_cache) == 1
+
+        # -- Second call: cache hit -> API NOT called again -------------
+        mock_sb.lineups.reset_mock()
+        lineups_cached = adapter.load_match_lineups("999")
+
+        mock_sb.lineups.assert_not_called()
+        assert len(lineups_cached) == len(lineups)
+        for tid in lineups:
+            assert len(lineups_cached[tid].players) == len(lineups[tid].players)
+
+    @patch("tactical.adapters.statsbomb.sb")
+    def test_events_and_lineups_cached_independently(
+        self,
+        mock_sb: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """Event and lineup caches use distinct keys and don't interfere."""
+        fake_df = pd.DataFrame(_INTEGRATION_EVENTS)
+        mock_sb.events.return_value = fake_df
+        mock_sb.lineups.return_value = _INTEGRATION_LINEUPS
+
+        adapter = StatsBombAdapter(cache_dir=tmp_path / "match_cache")
+
+        # Load events only
+        adapter.load_match_events("999")
+        mock_sb.events.assert_called_once()
+        mock_sb.lineups.assert_not_called()
+
+        # Load lineups only
+        adapter.load_match_lineups("999")
+        mock_sb.lineups.assert_called_once()
+
+        cache_dir = tmp_path / "match_cache"
+        event_cache = cache_dir / "match_999.pkl"
+        lineup_cache = cache_dir / "match_999_lineups.pkl"
+        assert event_cache.is_file()
+        assert lineup_cache.is_file()
+
+        # Both cached: neither API called on second pass
+        mock_sb.events.reset_mock()
+        mock_sb.lineups.reset_mock()
+
+        adapter.load_match_events("999")
+        adapter.load_match_lineups("999")
+
+        mock_sb.events.assert_not_called()
+        mock_sb.lineups.assert_not_called()

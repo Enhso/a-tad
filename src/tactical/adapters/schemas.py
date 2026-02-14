@@ -144,6 +144,92 @@ class MatchInfo:
 
 
 @dataclass(frozen=True, slots=True)
+class CardEvent:
+    """A card shown to a player during a match.
+
+    Attributes:
+        time: Timestamp string in ``MM:SS`` format.
+        card_type: Card type label (e.g. ``"Yellow Card"``,
+            ``"Second Yellow"``, ``"Red Card"``).
+        reason: Reason the card was shown (e.g. ``"Foul Committed"``).
+        period: Match period in which the card was shown.
+    """
+
+    time: str
+    card_type: str
+    reason: str
+    period: int
+
+
+@dataclass(frozen=True, slots=True)
+class PositionSpell:
+    """A contiguous period during which a player occupied one position.
+
+    A player's match involvement is represented as a sequence of
+    non-overlapping :class:`PositionSpell` entries ordered by time.
+
+    Attributes:
+        position_id: Provider-specific position identifier.
+        position: Human-readable position name
+            (e.g. ``"Center Forward"``).
+        from_time: Start timestamp (``MM:SS``), or ``None`` if unknown.
+        to_time: End timestamp (``MM:SS``), or ``None`` if the player
+            remained in this position until the final whistle.
+        from_period: Period in which this spell began, or ``None``.
+        to_period: Period in which this spell ended, or ``None``.
+        start_reason: Why the player entered this position
+            (e.g. ``"Starting XI"``, ``"Tactical Shift"``).
+        end_reason: Why the player left this position
+            (e.g. ``"Final Whistle"``, ``"Substitution - Off (Tactical)"``).
+    """
+
+    position_id: int
+    position: str
+    from_time: str | None
+    to_time: str | None
+    from_period: int | None
+    to_period: int | None
+    start_reason: str
+    end_reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class PlayerLineup:
+    """A single player's lineup entry for one match.
+
+    Attributes:
+        player_id: Unique identifier of the player.
+        player_name: Full display name.
+        jersey_number: Shirt number worn in this match.
+        starter: ``True`` if the player was in the Starting XI.
+        positions: Chronological sequence of position spells.
+        cards: Cards received during the match (may be empty).
+    """
+
+    player_id: str
+    player_name: str
+    jersey_number: int
+    starter: bool
+    positions: tuple[PositionSpell, ...]
+    cards: tuple[CardEvent, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class TeamLineup:
+    """Complete squad list for one team in a single match.
+
+    Attributes:
+        team_id: Unique identifier of the team.
+        team_name: Display name of the team.
+        players: All players in the squad (starters + substitutes).
+    """
+
+    team_id: str
+    team_name: str
+    players: tuple[PlayerLineup, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class MatchContext:
     """Per-team context for a single match analysis run.
 

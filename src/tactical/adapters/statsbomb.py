@@ -16,7 +16,15 @@ import pandas as pd
 from statsbombpy import sb  # type: ignore[import-untyped]
 
 from tactical.adapters.cache import MatchCache
-from tactical.adapters.schemas import FreezeFramePlayer, MatchInfo, NormalizedEvent
+from tactical.adapters.schemas import (
+    CardEvent,
+    FreezeFramePlayer,
+    MatchInfo,
+    NormalizedEvent,
+    PlayerLineup,
+    PositionSpell,
+    TeamLineup,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -107,7 +115,7 @@ def _parse_timestamp(ts: str) -> float:
 
 
 class StatsBombAdapter:
-    """Adapter for loading and normalizing StatsBomb event data.
+    """Adapter for loading and normalizing StatsBomb event and lineup data.
 
     Satisfies the :class:`~tactical.adapters.base.DataAdapter` protocol.
     Fetches data via ``statsbombpy``, normalizes coordinates to a 0-100
@@ -186,6 +194,30 @@ class StatsBombAdapter:
             self._cache.put(match_id, raw_df.to_dict(orient="list"))
         return self._normalize_events(raw_df, match_id)
 
+    def load_match_lineups(self, match_id: str) -> dict[str, TeamLineup]:
+        """Load and normalize lineup data for both teams in a match.
+
+        Checks the disk cache first.  On a cache miss the raw lineup
+        data is fetched from the StatsBomb API and cached for future
+        calls.
+
+        Args:
+            match_id: StatsBomb match identifier (as string).
+
+        Returns:
+            Dictionary mapping team-ID strings to :class:`TeamLineup`
+            instances.
+        """
+        cache_key = f"{match_id}_lineups"
+        raw_lineups: dict[str, Any]
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            raw_lineups = cached
+        else:
+            raw_lineups = sb.lineups(match_id=int(match_id), fmt="dict")
+            self._cache.put(cache_key, raw_lineups)
+        return self._normalize_lineups(raw_lineups)
+
     def supports_360(self) -> bool:
         """Indicate that StatsBomb supports 360 freeze-frame data.
 
@@ -197,6 +229,45 @@ class StatsBombAdapter:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _normalize_lineups(
+        raw_lineups: dict[str, Any],
+    ) -> dict[str, TeamLineup]:
+        """Convert raw StatsBomb lineup dicts to normalized schemas.
+
+        Args:
+            raw_lineups: Dictionary keyed by team-ID string, each value
+                a dict with ``team_id``, ``team_name``, and ``lineup``
+                as returned by ``statsbombpy``.
+
+        Returns:
+            Dictionary mapping team-ID strings to :class:`TeamLineup`.
+        """
+        result: dict[str, TeamLineup] = {}
+        for _team_key, team_data in raw_lineups.items():
+            team_id = str(team_data["team_id"])
+            players: list[PlayerLineup] = []
+            for player_data in team_data.get("lineup", []):
+                positions = _build_position_spells(player_data.get("positions", []))
+                cards = _build_card_events(player_data.get("cards", []))
+                starter = any(ps.start_reason == "Starting XI" for ps in positions)
+                players.append(
+                    PlayerLineup(
+                        player_id=str(player_data["player_id"]),
+                        player_name=player_data["player_name"],
+                        jersey_number=int(player_data.get("jersey_number", 0)),
+                        starter=starter,
+                        positions=positions,
+                        cards=cards,
+                    )
+                )
+            result[team_id] = TeamLineup(
+                team_id=team_id,
+                team_name=team_data["team_name"],
+                players=tuple(players),
+            )
+        return result
 
     @staticmethod
     def _normalize_coordinates(x: float, y: float) -> tuple[float, float]:
@@ -438,6 +509,12 @@ class StatsBombAdapter:
                     "Error",
                     "50/50",
                     "Dribbled Past",
+                    "Shield",
+                    "Offside",
+                    "Own Goal For",
+                    "Own Goal Against",
+                    "Player Off",
+                    "Player On",
                 }:
                     logger.warning(
                         "Unknown StatsBomb event type %r in match %s -- skipping",
@@ -517,3 +594,64 @@ class StatsBombAdapter:
         """
         starting_xi = raw_df[raw_df["type"] == "Starting XI"].sort_values("index")
         return int(starting_xi.iloc[0]["team_id"])
+
+
+# ------------------------------------------------------------------
+# Module-level helpers for lineup normalization
+# ------------------------------------------------------------------
+
+
+def _build_position_spells(
+    raw_positions: list[dict[str, Any]],
+) -> tuple[PositionSpell, ...]:
+    """Convert raw StatsBomb position entries to :class:`PositionSpell` tuples.
+
+    Args:
+        raw_positions: List of position dicts from the lineup API.
+
+    Returns:
+        Tuple of :class:`PositionSpell` instances.
+    """
+    spells: list[PositionSpell] = []
+    for pos in raw_positions:
+        from_time = pos.get("from")
+        to_time = pos.get("to")
+        from_period = pos.get("from_period")
+        to_period = pos.get("to_period")
+        spells.append(
+            PositionSpell(
+                position_id=int(pos["position_id"]),
+                position=pos["position"],
+                from_time=from_time if from_time is not None else None,
+                to_time=to_time if to_time is not None else None,
+                from_period=int(from_period) if from_period is not None else None,
+                to_period=int(to_period) if to_period is not None else None,
+                start_reason=pos.get("start_reason", "unknown"),
+                end_reason=pos.get("end_reason", "unknown"),
+            )
+        )
+    return tuple(spells)
+
+
+def _build_card_events(
+    raw_cards: list[dict[str, Any]],
+) -> tuple[CardEvent, ...]:
+    """Convert raw StatsBomb card entries to :class:`CardEvent` tuples.
+
+    Args:
+        raw_cards: List of card dicts from the lineup API.
+
+    Returns:
+        Tuple of :class:`CardEvent` instances.
+    """
+    cards: list[CardEvent] = []
+    for card in raw_cards:
+        cards.append(
+            CardEvent(
+                time=card["time"],
+                card_type=card["card_type"],
+                reason=card.get("reason", "unknown"),
+                period=int(card["period"]),
+            )
+        )
+    return tuple(cards)
