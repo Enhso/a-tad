@@ -126,4 +126,4 @@ def extract_match_features(
         )
         raise FeatureExtractionError(msg)
 
-    return pl.DataFrame(rows)
+    return pl.DataFrame(rows, infer_schema_length=len(rows))
