@@ -4,6 +4,7 @@ Provides preprocessing utilities and model backends for clustering
 and sequence modelling of tactical features.
 """
 
+from tactical.config import ChangepointConfig, HMMConfig, VAEConfig
 from tactical.models.base import TacticalModel
 from tactical.models.changepoint import (
     Changepoint,
@@ -31,17 +32,20 @@ from tactical.models.vae_discovery import (
 
 __all__ = [
     "Changepoint",
+    "ChangepointConfig",
     "ChangepointResult",
     "ComparisonRow",
     "ComparisonTable",
     "DatasetDiscoveryResult",
     "GMMConfig",
     "GMMModel",
+    "HMMConfig",
     "HMMDiscoveryResult",
     "HMMModel",
     "ModelSelectionResult",
     "PreprocessingPipeline",
     "TacticalModel",
+    "VAEConfig",
     "VAEGMMDiscoveryResult",
     "VAEModel",
     "detect_changepoints",
